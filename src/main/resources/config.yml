@@ -1,0 +1,2 @@
+firebase:
+  databaseUrl: "https://YOUR_PROJECT_ID.firebaseio.com/"

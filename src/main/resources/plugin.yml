@@ -1,0 +1,4 @@
+name: skurimcchat
+version: '1.0-SNAPSHOT'
+main: com.jisung.skurimcchat.Skurimcchat
+api-version: '1.21'
