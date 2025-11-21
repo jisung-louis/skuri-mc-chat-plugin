@@ -9,8 +9,17 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.FoodLevelChangeEvent;
 
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
@@ -26,7 +35,6 @@ import java.util.Map;
 
 import java.util.logging.Level;
 
-import org.bukkit.World;
 import org.bukkit.entity.Player;
 
 import java.util.Set;
@@ -37,10 +45,9 @@ import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 
 public final class Skurimcchat extends JavaPlugin implements Listener {
 
-    private long frozenTime = -1;
-
     private final Set<UUID> whitelistedPlayers = ConcurrentHashMap.newKeySet();
     private volatile boolean whitelistEnabled = false;
+    private final Set<UUID> frozenPlayers = ConcurrentHashMap.newKeySet();
 
     private void startServerStatusHeartbeat() {
         try {
@@ -123,21 +130,6 @@ public final class Skurimcchat extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
 
 
-        // Freeze world time when no players are online
-        getServer().getScheduler().runTaskTimer(this, () -> {
-            if (getServer().getOnlinePlayers().isEmpty()) {
-                World world = getServer().getWorld("world");
-                if (world == null) return;
-
-                if (frozenTime == -1) {
-                    frozenTime = world.getFullTime();
-                }
-
-                world.setFullTime(frozenTime);
-            } else {
-                frozenTime = -1; // Unfreeze when players join
-            }
-        }, 0L, 1L);
 
         // Ensure plugin data folder exists
         if (!getDataFolder().exists()) {
@@ -332,6 +324,11 @@ public final class Skurimcchat extends JavaPlugin implements Listener {
         if (!whitelistEnabled) return;
 
         UUID uuid = event.getUniqueId();
+        // Skip BE players at pre-login; allow join and handle in onPlayerJoin
+        String pname = event.getName();
+        if (pname != null && pname.startsWith("[BE]")) {
+            return;
+        }
 
         if (!whitelistedPlayers.contains(uuid)) {
             event.disallow(
@@ -341,6 +338,186 @@ public final class Skurimcchat extends JavaPlugin implements Listener {
                             .append(Component.newline())
                             .append(Component.text("앱스토어에서 '스쿠리'를 검색해서 설치하고 성결대 계정으로 로그인해서 신청할 수 있고, 스쿠리를 사용하고 있는 친구에게 등록을 부탁할 수 있어요! (한 사람당 친구 최대 3명 등록 가능)",NamedTextColor.BLUE))
             );
+        }
+    }
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player p = event.getPlayer();
+        String name = p.getName();
+        boolean isBedrock = name.startsWith("[BE]");
+
+        if (isBedrock) {
+            String cleanName = name.substring(4); // remove "[BE]"
+            DatabaseReference ref = FirebaseDatabase.getInstance()
+                    .getReference("whitelist/BEPlayers")
+                    .child(cleanName);
+
+            ref.addListenerForSingleValueEvent(new com.google.firebase.database.ValueEventListener() {
+                @Override
+                public void onDataChange(com.google.firebase.database.DataSnapshot snapshot) {
+                    boolean exists = snapshot.exists();
+
+                    if (!exists) {
+                        frozenPlayers.add(p.getUniqueId());
+                        p.setWalkSpeed(0f);
+                        p.setFlySpeed(0f);
+                        p.setInvulnerable(true);
+                        // Additional restrictions for frozen BE players
+                        p.setCollidable(false);
+                        p.setAllowFlight(true);
+                        p.setFlying(true);
+                        p.setSilent(true);
+                        p.setInvisible(true);
+                        p.setCanPickupItems(false);
+                        p.showTitle(net.kyori.adventure.title.Title.title(
+                                Component.text("스쿠리 서버 접속 불가", NamedTextColor.RED),
+                                Component.text("스쿠리 앱에서 계정 등록 후 접속해주세요.", NamedTextColor.YELLOW)
+                        ));
+                        // Schedule repeating title every 5 seconds for frozen player
+                        getServer().getScheduler().runTaskTimer(Skurimcchat.this, task -> {
+                            if (!frozenPlayers.contains(p.getUniqueId()) || !p.isOnline()) {
+                                task.cancel();
+                                return;
+                            }
+                            p.showTitle(net.kyori.adventure.title.Title.title(
+                                    Component.text("스쿠리 서버 접속 불가", NamedTextColor.RED),
+                                    Component.text("스쿠리 앱에서 계정 등록 후 접속해주세요.", NamedTextColor.YELLOW)
+                            ));
+                        }, 100L, 100L);
+                        // Continuous warning message task for frozen players
+                        getServer().getScheduler().runTaskTimer(Skurimcchat.this, task -> {
+                            if (!frozenPlayers.contains(p.getUniqueId()) || !p.isOnline()) {
+                                task.cancel();
+                                return;
+                            }
+                            p.sendMessage(Component.text("⚠ 스쿠리 서버 계정 등록이 필요합니다!", NamedTextColor.RED));
+                        }, 0L, 100L);
+                        // Hide this player from all others
+                        for (Player other : getServer().getOnlinePlayers()) {
+                            if (!other.getUniqueId().equals(p.getUniqueId())) {
+                                other.hidePlayer(Skurimcchat.this, p);
+                            }
+                        }
+                    } else {
+                        frozenPlayers.remove(p.getUniqueId());
+                        p.setWalkSpeed(0.2f);
+                        p.setFlySpeed(0.1f);
+                        p.setInvulnerable(false);
+                        // Unhide and restore player state
+                        for (Player other : getServer().getOnlinePlayers()) {
+                            if (!other.getUniqueId().equals(p.getUniqueId())) {
+                                other.showPlayer(Skurimcchat.this, p);
+                            }
+                        }
+                        p.setInvisible(false);
+                        p.setSilent(false);
+                        p.setCollidable(true);
+                        p.setCanPickupItems(true);
+
+                        sendSystemMessage(p.getName() + "님이 서버에 접속했어요.");
+                        updatePlayerList();
+                    }
+                }
+
+                @Override
+                public void onCancelled(com.google.firebase.database.DatabaseError error) {
+                    getLogger().warning("[Whitelist] BE lookup failed: " + error.getMessage());
+                }
+            });
+
+            return; // BE branch complete
+        }
+
+        // JE users follow standard whitelist handling
+        sendSystemMessage(p.getName() + "님이 서버에 접속했어요.");
+        updatePlayerList();
+    }
+
+    @EventHandler
+    public void onMove(PlayerMoveEvent event) {
+        Player p = event.getPlayer();
+        if (frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onBlockBreak(BlockBreakEvent event) {
+        if (frozenPlayers.contains(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(Component.text("스쿠리 서버에서 계정 등록이 필요합니다.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler
+    public void onBlockPlace(BlockPlaceEvent event) {
+        if (frozenPlayers.contains(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(Component.text("스쿠리 서버에서 계정 등록이 필요합니다.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler
+    public void onPlayerInteract(PlayerInteractEvent event) {
+        if (frozenPlayers.contains(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(Component.text("스쿠리 서버에서 계정 등록이 필요합니다.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler
+    public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
+        if (event.getDamager() instanceof Player p && frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+
+    @EventHandler
+    public void onPlayerChat(AsyncChatEvent event) {
+        Player player = event.getPlayer();
+        if (frozenPlayers.contains(player.getUniqueId())) {
+            player.sendMessage(Component.text("스쿠리 서버에서 계정 등록이 필요합니다.", NamedTextColor.RED));
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onCommandPreprocess(org.bukkit.event.player.PlayerCommandPreprocessEvent event) {
+        Player p = event.getPlayer();
+        if (frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+            p.sendMessage(Component.text("화이트리스트 승인이 필요합니다.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        if (event.getPlayer() instanceof Player p && frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+            p.sendMessage(Component.text("화이트리스트 승인이 필요합니다.", NamedTextColor.RED));
+        }
+    }
+
+    @EventHandler
+    public void onItemPickup(EntityPickupItemEvent event) {
+        if (event.getEntity() instanceof Player p && frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onDamage(EntityDamageEvent event) {
+        if (event.getEntity() instanceof Player p && frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onHungerChange(FoodLevelChangeEvent event) {
+        if (event.getEntity() instanceof Player p && frozenPlayers.contains(p.getUniqueId())) {
+            event.setCancelled(true);
         }
     }
 
@@ -365,13 +542,17 @@ public final class Skurimcchat extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onChat(AsyncChatEvent event) {
+        if (frozenPlayers.contains(event.getPlayer().getUniqueId())) {
+            event.getPlayer().sendMessage(Component.text("화이트리스트 승인이 필요합니다.", NamedTextColor.RED));
+            event.setCancelled(true);
+            return;
+        }
+
         String playerName = event.getPlayer().getName();
         String message = PlainTextComponentSerializer.plainText().serialize(event.message());
 
         try {
-            DatabaseReference ref = FirebaseDatabase.getInstance()
-                    .getReference("mc_chat/messages");
-
+            DatabaseReference ref = FirebaseDatabase.getInstance().getReference("mc_chat/messages");
             Map<String, Object> msg = new HashMap<>();
             msg.put("username", playerName);
             msg.put("message", message);
@@ -403,19 +584,13 @@ public final class Skurimcchat extends JavaPlugin implements Listener {
         }
     }
 
-    @EventHandler
-    public void onPlayerJoin(PlayerJoinEvent event) {
-        String playerName = event.getPlayer().getName();
-        sendSystemMessage(playerName + "님이 서버에 접속했어요.");
-
-        // 접속 중인 플레이어 목록 & 카운트 갱신
-        updatePlayerList();
-    }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         String playerName = event.getPlayer().getName();
-        sendSystemMessage(playerName + "님이 서버에서 나갔어요.");
+        if (!frozenPlayers.contains(event.getPlayer().getUniqueId())) {
+            sendSystemMessage(playerName + "님이 서버에서 나갔어요.");
+        }
 
         // 접속 중인 플레이어 목록 & 카운트 갱신
         updatePlayerList();
