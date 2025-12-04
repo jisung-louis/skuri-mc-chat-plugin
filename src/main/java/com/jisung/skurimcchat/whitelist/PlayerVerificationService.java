@@ -41,6 +41,13 @@ public class PlayerVerificationService {
                 if (!exists) {
                     frozenPlayerManager.freezePlayer(player);
                 } else {
+                    // 화이트리스트 인증이 성공한 BE 유저에 한해서만 lastSeenAt 기록
+                    long now = System.currentTimeMillis();
+                    database.getReference("whitelist/BEPlayers")
+                            .child(cleanName)
+                            .child("lastSeenAt")
+                            .setValueAsync(now);
+
                     frozenPlayerManager.unfreezePlayer(player);
                     if (onVerified != null) {
                         onVerified.run();

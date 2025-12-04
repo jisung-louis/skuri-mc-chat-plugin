@@ -85,7 +85,7 @@ public final class Skurimcchat extends JavaPlugin {
         chatListener = new ChatListener(chatService, frozenPlayerManager);
         playerConnectionListener = new PlayerConnectionListener(
                 whitelistManager, playerVerificationService, chatService,
-                serverStatusService, frozenPlayerManager);
+                serverStatusService, frozenPlayerManager, database);
         deathListener = new DeathListener(chatService);
         frozenPlayerChatListener = new FrozenPlayerChatListener(frozenPlayerManager);
         frozenPlayerRestrictionListener = new FrozenPlayerRestrictionListener(frozenPlayerManager);
