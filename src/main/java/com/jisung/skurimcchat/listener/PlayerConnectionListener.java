@@ -1,6 +1,10 @@
 package com.jisung.skurimcchat.listener;
 
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ValueEventListener;
 import com.jisung.skurimcchat.restriction.FrozenPlayerManager;
 import com.jisung.skurimcchat.service.ChatService;
 import com.jisung.skurimcchat.service.ServerStatusService;
@@ -96,14 +100,30 @@ public class PlayerConnectionListener implements Listener {
                     .setValueAsync(now);
         }
 
-        // BE 유저(이름이 [BE]로 시작)도 퇴장 시 lastSeenAt 갱신 (닉네임 기반 key 사용)
+        // BE 유저(이름이 [BE]로 시작)도 퇴장 시 lastSeenAt 갱신 (화이트리스트 노드가 존재할 때만)
         if (verificationService.isBedrockPlayer(playerName)) {
-            long now = System.currentTimeMillis();
             String cleanName = playerName.substring(4); // remove "[BE]"
-            database.getReference("whitelist/BEPlayers")
-                    .child(cleanName)
-                    .child("lastSeenAt")
-                    .setValueAsync(now);
+            DatabaseReference ref = database.getReference("whitelist/BEPlayers").child(cleanName);
+            
+            // 노드 존재 여부 확인 후, 존재할 때만 lastSeenAt 기록
+            ref.addListenerForSingleValueEvent(new ValueEventListener() {
+                @Override
+                public void onDataChange(DataSnapshot snapshot) {
+                    if (snapshot.exists()) {
+                        // 화이트리스트에 등록된 BE 유저만 lastSeenAt 갱신
+                        long now = System.currentTimeMillis();
+                        database.getReference("whitelist/BEPlayers")
+                                .child(cleanName)
+                                .child("lastSeenAt")
+                                .setValueAsync(now);
+                    }
+                }
+
+                @Override
+                public void onCancelled(DatabaseError error) {
+                    // 에러 발생 시 무시 (로그만 남기지 않음)
+                }
+            });
         }
 
         serverStatusService.updatePlayerList();
