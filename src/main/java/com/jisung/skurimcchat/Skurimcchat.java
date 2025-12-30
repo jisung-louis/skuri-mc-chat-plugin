@@ -4,6 +4,7 @@ import com.jisung.skurimcchat.listener.ChatListener;
 import com.jisung.skurimcchat.listener.DeathListener;
 import com.jisung.skurimcchat.listener.FrozenPlayerChatListener;
 import com.jisung.skurimcchat.listener.PlayerConnectionListener;
+import com.jisung.skurimcchat.listener.TerrorPreventionListener;
 import com.jisung.skurimcchat.restriction.FrozenPlayerManager;
 import com.jisung.skurimcchat.restriction.FrozenPlayerRestrictionListener;
 import com.jisung.skurimcchat.service.ChatService;
@@ -35,6 +36,7 @@ public final class Skurimcchat extends JavaPlugin {
     private DeathListener deathListener;
     private FrozenPlayerChatListener frozenPlayerChatListener;
     private FrozenPlayerRestrictionListener frozenPlayerRestrictionListener;
+    private TerrorPreventionListener terrorPreventionListener;
 
     @Override
     public void onEnable() {
@@ -89,12 +91,14 @@ public final class Skurimcchat extends JavaPlugin {
         deathListener = new DeathListener(chatService);
         frozenPlayerChatListener = new FrozenPlayerChatListener(frozenPlayerManager);
         frozenPlayerRestrictionListener = new FrozenPlayerRestrictionListener(frozenPlayerManager);
+        terrorPreventionListener = new TerrorPreventionListener(this);
 
         getServer().getPluginManager().registerEvents(chatListener, this);
         getServer().getPluginManager().registerEvents(playerConnectionListener, this);
         getServer().getPluginManager().registerEvents(deathListener, this);
         getServer().getPluginManager().registerEvents(frozenPlayerChatListener, this);
         getServer().getPluginManager().registerEvents(frozenPlayerRestrictionListener, this);
+        getServer().getPluginManager().registerEvents(terrorPreventionListener, this);
 
         // Send startup message
         chatService.sendSystemMessage("스쿠리 마인크래프트 서버가 열렸어요.");
