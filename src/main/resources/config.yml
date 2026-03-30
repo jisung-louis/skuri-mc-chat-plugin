@@ -1,2 +1,10 @@
-firebase:
-  databaseUrl: "https://YOUR_PROJECT_ID.firebaseio.com/"
+springBridge:
+  baseUrl: "http://127.0.0.1:8080"
+  sharedSecret: "change-me"
+  serverAddress: "mc.skuri.app"
+  mapUrl: "https://map.skuri.app"
+  serverVersion: ""
+  connectTimeoutMillis: 5000
+  requestTimeoutMillis: 10000
+  sseReconnectDelayMillis: 3000
+  heartbeatIntervalTicks: 200

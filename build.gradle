@@ -17,14 +17,10 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.10-R0.1-SNAPSHOT")
-    implementation ('com.google.firebase:firebase-admin:9.2.0')
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
 }
 
 shadowJar {
-    relocate 'com.google.api', 'com.jisung.shadow.google.api'
-    relocate 'com.google.auth', 'com.jisung.shadow.google.auth'
-    relocate 'com.google.common', 'com.jisung.shadow.google.common'
-    relocate 'com.google.gson', 'com.jisung.shadow.google.gson'
     relocate 'com.fasterxml.jackson', 'com.jisung.shadow.jackson'
 }
 

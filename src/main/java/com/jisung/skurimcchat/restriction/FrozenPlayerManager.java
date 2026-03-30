@@ -23,7 +23,9 @@ public class FrozenPlayerManager {
 
     public void freezePlayer(Player player) {
         UUID uuid = player.getUniqueId();
-        frozenPlayers.add(uuid);
+        if (!frozenPlayers.add(uuid)) {
+            return;
+        }
 
         // Apply restrictions
         player.setWalkSpeed(0f);
@@ -69,7 +71,9 @@ public class FrozenPlayerManager {
 
     public void unfreezePlayer(Player player) {
         UUID uuid = player.getUniqueId();
-        frozenPlayers.remove(uuid);
+        if (!frozenPlayers.remove(uuid)) {
+            return;
+        }
 
         // Restore normal state
         player.setWalkSpeed(0.2f);
@@ -92,4 +96,3 @@ public class FrozenPlayerManager {
         frozenPlayers.remove(uuid);
     }
 }
-

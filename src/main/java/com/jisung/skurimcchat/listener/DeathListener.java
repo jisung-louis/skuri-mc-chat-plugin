@@ -29,15 +29,14 @@ public class DeathListener implements Listener {
         }
 
         String translated = DeathMessageMapper.translate(rawDeathMessage);
-        chatService.sendSystemMessage(translated);
+        chatService.sendPlayerSystemMessage(event.getEntity(), translated, "DEATH");
     }
 
     @EventHandler(priority = EventPriority.NORMAL)
     public void onEntityDeath(EntityDeathEvent event) {
         String msg = EntityDeathMessageFormatter.format(event);
         if (msg != null && !msg.isEmpty()) {
-            chatService.sendSystemMessage(msg);
+            chatService.sendServerSystemMessage(msg, "SPECIAL");
         }
     }
 }
-
