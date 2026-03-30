@@ -1,5 +1,9 @@
 package com.jisung.skurimcchat;
 
+import com.jisung.skurimcchat.bridge.MinecraftIdentityResolver;
+import com.jisung.skurimcchat.bridge.SpringBridgeClient;
+import com.jisung.skurimcchat.bridge.SpringBridgeConfig;
+import com.jisung.skurimcchat.bridge.SpringBridgeEventDispatcher;
 import com.jisung.skurimcchat.listener.ChatListener;
 import com.jisung.skurimcchat.listener.DeathListener;
 import com.jisung.skurimcchat.listener.FrozenPlayerChatListener;
@@ -8,7 +12,6 @@ import com.jisung.skurimcchat.listener.TerrorPreventionListener;
 import com.jisung.skurimcchat.restriction.FrozenPlayerManager;
 import com.jisung.skurimcchat.restriction.FrozenPlayerRestrictionListener;
 import com.jisung.skurimcchat.service.ChatService;
-import com.jisung.skurimcchat.service.FirebaseService;
 import com.jisung.skurimcchat.service.ServerStatusService;
 import com.jisung.skurimcchat.whitelist.PlayerVerificationService;
 import com.jisung.skurimcchat.whitelist.WhitelistManager;
@@ -18,9 +21,11 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class Skurimcchat extends JavaPlugin {
 
     // Services
-    private FirebaseService firebaseService;
+    private SpringBridgeClient springBridgeClient;
     private ChatService chatService;
     private ServerStatusService serverStatusService;
+    private SpringBridgeConfig springBridgeConfig;
+    private MinecraftIdentityResolver identityResolver;
     
     // Whitelist
     private WhitelistManager whitelistManager;
@@ -49,45 +54,50 @@ public final class Skurimcchat extends JavaPlugin {
 
         // Load config.yml
         saveDefaultConfig();
-        String dbUrl = getConfig().getString("firebase.databaseUrl");
-        if (dbUrl == null || dbUrl.isEmpty()) {
-            getLogger().severe("firebase.databaseUrl is missing in config.yml!");
+        try {
+            springBridgeConfig = SpringBridgeConfig.from(this);
+        } catch (IllegalArgumentException e) {
+            getLogger().severe(e.getMessage());
             return;
         }
 
-        // Initialize Firebase
-        firebaseService = new FirebaseService(this);
-        if (!firebaseService.initialize(dbUrl)) {
-            getLogger().severe("Failed to initialize Firebase! Plugin will not function correctly.");
-            return;
-        }
-
-        var database = firebaseService.getDatabase();
-
-        // Initialize services
-        chatService = new ChatService(this, getServer(), database);
-        serverStatusService = new ServerStatusService(this, getServer(), database);
-
-        // Initialize whitelist components
-        whitelistManager = new WhitelistManager(this, getServer());
-        whitelistSyncService = new WhitelistSyncService(this, database, whitelistManager);
-        
-        // Initialize frozen player manager
+        identityResolver = new MinecraftIdentityResolver();
         frozenPlayerManager = new FrozenPlayerManager(this);
-        
-        // Initialize player verification service
-        playerVerificationService = new PlayerVerificationService(
-                this, database, whitelistManager, frozenPlayerManager);
+        whitelistManager = new WhitelistManager(this, getServer(), identityResolver);
+        whitelistManager.activateProtection();
 
-        // Setup Firebase listeners
-        chatService.setupAppToMcListener();
-        whitelistSyncService.setupSync();
+        playerVerificationService = new PlayerVerificationService(
+                this, getServer(), whitelistManager, frozenPlayerManager, identityResolver);
+        whitelistSyncService = new WhitelistSyncService(this, whitelistManager, playerVerificationService);
+
+        springBridgeClient = new SpringBridgeClient(
+                this,
+                springBridgeConfig,
+                null
+        );
+        chatService = new ChatService(this, getServer(), springBridgeClient, identityResolver);
+        springBridgeClient.setEventListener(new SpringBridgeEventDispatcher(chatService, whitelistSyncService));
+        serverStatusService = new ServerStatusService(
+                this,
+                getServer(),
+                springBridgeClient,
+                springBridgeConfig,
+                identityResolver
+        );
+
+        springBridgeClient.start();
+        boolean initialSnapshotReady = springBridgeClient.awaitInitialWhitelistSnapshot(10_000L);
+        if (initialSnapshotReady) {
+            getLogger().info("초기 화이트리스트 스냅샷을 수신했어요.");
+        } else {
+            getLogger().warning("초기 화이트리스트 스냅샷 대기 시간이 초과되었어요. 연결이 복구되면 자동 동기화됩니다.");
+        }
 
         // Initialize and register event listeners
         chatListener = new ChatListener(chatService, frozenPlayerManager);
         playerConnectionListener = new PlayerConnectionListener(
                 whitelistManager, playerVerificationService, chatService,
-                serverStatusService, frozenPlayerManager, database);
+                serverStatusService, frozenPlayerManager);
         deathListener = new DeathListener(chatService);
         frozenPlayerChatListener = new FrozenPlayerChatListener(frozenPlayerManager);
         frozenPlayerRestrictionListener = new FrozenPlayerRestrictionListener(frozenPlayerManager);
@@ -101,7 +111,7 @@ public final class Skurimcchat extends JavaPlugin {
         getServer().getPluginManager().registerEvents(terrorPreventionListener, this);
 
         // Send startup message
-        chatService.sendSystemMessage("스쿠리 마인크래프트 서버가 열렸어요.");
+        chatService.sendServerSystemMessage("스쿠리 마인크래프트 서버가 열렸어요.", "STARTUP");
 
         // Initialize server status
         serverStatusService.updateServerOnlineFlag(true);
@@ -114,13 +124,17 @@ public final class Skurimcchat extends JavaPlugin {
         getLogger().info("스쿠리 플러그인 종료!");
         
         if (chatService != null) {
-            chatService.sendSystemMessage("스쿠리 마인크래프트 서버가 닫혔어요.");
+            chatService.sendServerSystemMessage("스쿠리 마인크래프트 서버가 닫혔어요.", "SHUTDOWN");
         }
 
         if (serverStatusService != null) {
             serverStatusService.updateServerOnlineFlag(false);
             serverStatusService.clearPlayersOnShutdown();
             serverStatusService.stopHeartbeat();
+        }
+
+        if (springBridgeClient != null) {
+            springBridgeClient.stop();
         }
     }
 }

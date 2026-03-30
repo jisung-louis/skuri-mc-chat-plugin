@@ -1,63 +1,68 @@
 package com.jisung.skurimcchat.whitelist;
 
-import com.google.firebase.database.DataSnapshot;
-import com.google.firebase.database.DatabaseError;
-import com.google.firebase.database.DatabaseReference;
-import com.google.firebase.database.FirebaseDatabase;
-import com.google.firebase.database.ValueEventListener;
+import com.jisung.skurimcchat.bridge.MinecraftIdentityResolver;
+import com.jisung.skurimcchat.restriction.FrozenPlayerManager;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import org.bukkit.Server;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
-import com.jisung.skurimcchat.restriction.FrozenPlayerManager;
 
 public class PlayerVerificationService {
     private final JavaPlugin plugin;
-    private final FirebaseDatabase database;
+    private final Server server;
+    private final WhitelistManager whitelistManager;
     private final FrozenPlayerManager frozenPlayerManager;
+    private final MinecraftIdentityResolver identityResolver;
 
-    public PlayerVerificationService(JavaPlugin plugin, FirebaseDatabase database,
-                                     WhitelistManager whitelistManager,
-                                     FrozenPlayerManager frozenPlayerManager) {
+    public PlayerVerificationService(
+            JavaPlugin plugin,
+            Server server,
+            WhitelistManager whitelistManager,
+            FrozenPlayerManager frozenPlayerManager,
+            MinecraftIdentityResolver identityResolver
+    ) {
         this.plugin = plugin;
-        this.database = database;
+        this.server = server;
+        this.whitelistManager = whitelistManager;
         this.frozenPlayerManager = frozenPlayerManager;
+        this.identityResolver = identityResolver;
     }
 
     public boolean isBedrockPlayer(String playerName) {
-        return playerName != null && playerName.startsWith("[BE]");
+        return identityResolver.isBedrockPlayer(playerName);
     }
 
     public void verifyBedrockPlayer(Player player, Runnable onVerified) {
-        String name = player.getName();
-        String cleanName = name.substring(4); // remove "[BE]"
-        DatabaseReference ref = database.getReference("whitelist/BEPlayers").child(cleanName);
+        if (!whitelistManager.isBridgeReady()) {
+            frozenPlayerManager.freezePlayer(player);
+            player.sendMessage(Component.text("인증 목록을 불러오는 중입니다. 잠시만 기다려주세요.", NamedTextColor.YELLOW));
+            return;
+        }
 
-        ref.addListenerForSingleValueEvent(new ValueEventListener() {
-            @Override
-            public void onDataChange(DataSnapshot snapshot) {
-                boolean exists = snapshot.exists();
+        if (!whitelistManager.hasBedrockAccount(player.getName())) {
+            frozenPlayerManager.freezePlayer(player);
+            return;
+        }
 
-                if (!exists) {
-                    frozenPlayerManager.freezePlayer(player);
-                } else {
-                    // 화이트리스트 인증이 성공한 BE 유저에 한해서만 lastSeenAt 기록
-                    long now = System.currentTimeMillis();
-                    database.getReference("whitelist/BEPlayers")
-                            .child(cleanName)
-                            .child("lastSeenAt")
-                            .setValueAsync(now);
+        frozenPlayerManager.unfreezePlayer(player);
+        if (onVerified != null) {
+            onVerified.run();
+        }
+    }
 
-                    frozenPlayerManager.unfreezePlayer(player);
-                    if (onVerified != null) {
-                        onVerified.run();
-                    }
+    public void recheckOnlineBedrockPlayers() {
+        server.getScheduler().runTask(plugin, () -> {
+            for (Player player : server.getOnlinePlayers()) {
+                if (!isBedrockPlayer(player.getName())) {
+                    continue;
                 }
-            }
 
-            @Override
-            public void onCancelled(DatabaseError error) {
-                plugin.getLogger().warning("[Whitelist] BE lookup failed: " + error.getMessage());
+                if (whitelistManager.hasBedrockAccount(player.getName())) {
+                    frozenPlayerManager.unfreezePlayer(player);
+                } else {
+                    frozenPlayerManager.freezePlayer(player);
+                }
             }
         });
     }
@@ -69,4 +74,3 @@ public class PlayerVerificationService {
                 .append(Component.text("앱스토어에서 '스쿠리'를 검색해서 설치하고 성결대 계정으로 로그인해서 신청할 수 있고, 스쿠리를 사용하고 있는 친구에게 등록을 부탁할 수 있어요! (한 사람당 친구 최대 3명 등록 가능)", NamedTextColor.BLUE));
     }
 }
-

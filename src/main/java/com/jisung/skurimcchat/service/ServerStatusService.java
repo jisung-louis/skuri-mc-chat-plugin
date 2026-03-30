@@ -1,61 +1,51 @@
 package com.jisung.skurimcchat.service;
 
-import com.google.firebase.database.DatabaseReference;
-import com.google.firebase.database.FirebaseDatabase;
+import com.jisung.skurimcchat.bridge.MinecraftIdentityResolver;
+import com.jisung.skurimcchat.bridge.SpringBridgeClient;
+import com.jisung.skurimcchat.bridge.SpringBridgeConfig;
+import com.jisung.skurimcchat.bridge.SpringBridgeModels;
 import org.bukkit.Server;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Level;
 
 public class ServerStatusService {
     private final JavaPlugin plugin;
     private final Server server;
-    private final FirebaseDatabase database;
+    private final SpringBridgeClient springBridgeClient;
+    private final SpringBridgeConfig springBridgeConfig;
+    private final MinecraftIdentityResolver identityResolver;
     private BukkitTask heartbeatTask;
 
-    public ServerStatusService(JavaPlugin plugin, Server server, FirebaseDatabase database) {
+    public ServerStatusService(
+            JavaPlugin plugin,
+            Server server,
+            SpringBridgeClient springBridgeClient,
+            SpringBridgeConfig springBridgeConfig,
+            MinecraftIdentityResolver identityResolver
+    ) {
         this.plugin = plugin;
         this.server = server;
-        this.database = database;
+        this.springBridgeClient = springBridgeClient;
+        this.springBridgeConfig = springBridgeConfig;
+        this.identityResolver = identityResolver;
     }
 
     public void startHeartbeat() {
-        try {
-            DatabaseReference statusRef = database.getReference("serverStatus");
-
-            // 10초마다 서버 상태 Heartbeat (비동기)
-            heartbeatTask = server.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
-                try {
-                    Map<String, Object> data = new HashMap<>();
-                    data.put("online", true);
-                    data.put("playerCount", server.getOnlinePlayers().size());
-                    data.put("maxPlayers", server.getMaxPlayers());
-                    data.put("updatedAt", System.currentTimeMillis());
-
-                    statusRef.updateChildrenAsync(data);
-                    // Also update current online players list every heartbeat
-                    DatabaseReference playersRef = database.getReference("serverStatus/players");
-
-                    Map<String, Object> players = new HashMap<>();
-                    for (Player p : server.getOnlinePlayers()) {
-                        Map<String, Object> info = new HashMap<>();
-                        info.put("name", p.getName());
-                        info.put("uuid", p.getUniqueId().toString());
-                        players.put(p.getUniqueId().toString(), info);
-                    }
-
-                    playersRef.setValueAsync(players);
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to send heartbeat!", e);
-                }
-            }, 0L, 200L); // 200 tick ~= 10초
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to start heartbeat!", e);
-        }
+        stopHeartbeat();
+        heartbeatTask = server.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+            try {
+                pushServerState(true);
+                updatePlayerList();
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to send heartbeat!", e);
+            }
+        }, 0L, springBridgeConfig.heartbeatIntervalTicks());
     }
 
     public void stopHeartbeat() {
@@ -67,14 +57,7 @@ public class ServerStatusService {
 
     public void updateServerOnlineFlag(boolean online) {
         try {
-            DatabaseReference statusRef = database.getReference("serverStatus");
-            Map<String, Object> data = new HashMap<>();
-            data.put("online", online);
-            data.put("updatedAt", System.currentTimeMillis());
-            if (!online) {
-                data.put("playerCount", 0);
-            }
-            statusRef.updateChildrenAsync(data);
+            pushServerState(online);
         } catch (Exception e) {
             plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to update online flag!", e);
         }
@@ -82,21 +65,19 @@ public class ServerStatusService {
 
     public void updatePlayerList() {
         try {
-            DatabaseReference playersRef = database.getReference("serverStatus/players");
-
-            Map<String, Object> players = new HashMap<>();
-            for (Player p : server.getOnlinePlayers()) {
-                Map<String, Object> info = new HashMap<>();
-                info.put("name", p.getName());
-                info.put("uuid", p.getUniqueId().toString());
-                players.put(p.getUniqueId().toString(), info);
+            List<SpringBridgeModels.OnlinePlayer> players = new ArrayList<>();
+            for (Player player : server.getOnlinePlayers()) {
+                players.add(new SpringBridgeModels.OnlinePlayer(
+                        player.getName(),
+                        identityResolver.resolveEdition(player),
+                        identityResolver.resolveIdentity(player)
+                ));
             }
 
-            playersRef.setValueAsync(players);
-
-            // playerCount 동기화
-            database.getReference("serverStatus/playerCount")
-                    .setValueAsync(players.size());
+            springBridgeClient.updateOnlinePlayers(new SpringBridgeModels.OnlinePlayersUpsertRequest(
+                    Instant.now().toString(),
+                    players
+            ));
         } catch (Exception e) {
             plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to update player list!", e);
         }
@@ -104,11 +85,31 @@ public class ServerStatusService {
 
     public void clearPlayersOnShutdown() {
         try {
-            database.getReference("serverStatus/players")
-                    .setValueAsync(null);
+            springBridgeClient.updateOnlinePlayers(new SpringBridgeModels.OnlinePlayersUpsertRequest(
+                    Instant.now().toString(),
+                    List.of()
+            ));
         } catch (Exception e) {
             plugin.getLogger().log(Level.SEVERE, "[ServerStatus] Failed to clear players on shutdown!", e);
         }
     }
-}
 
+    private void pushServerState(boolean online) {
+        springBridgeClient.updateServerState(new SpringBridgeModels.ServerStateUpsertRequest(
+                online,
+                online ? server.getOnlinePlayers().size() : 0,
+                server.getMaxPlayers(),
+                resolveServerVersion(),
+                springBridgeConfig.serverAddress(),
+                springBridgeConfig.mapUrl(),
+                Instant.now().toString()
+        ));
+    }
+
+    private String resolveServerVersion() {
+        if (springBridgeConfig.serverVersion() != null && !springBridgeConfig.serverVersion().isBlank()) {
+            return springBridgeConfig.serverVersion();
+        }
+        return server.getBukkitVersion();
+    }
+}
