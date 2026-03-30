@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -40,13 +41,29 @@ public class SpringBridgeClient {
             SpringBridgeConfig config,
             SpringBridgeEventListener eventListener
     ) {
+        this(
+                plugin,
+                config,
+                eventListener,
+                HttpClient.newBuilder()
+                        .connectTimeout(Duration.ofMillis(config.connectTimeoutMillis()))
+                        .build(),
+                new ObjectMapper().findAndRegisterModules()
+        );
+    }
+
+    SpringBridgeClient(
+            JavaPlugin plugin,
+            SpringBridgeConfig config,
+            SpringBridgeEventListener eventListener,
+            HttpClient httpClient,
+            ObjectMapper objectMapper
+    ) {
         this.plugin = plugin;
         this.config = config;
         this.eventListener = eventListener;
-        this.objectMapper = new ObjectMapper().findAndRegisterModules();
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(config.connectTimeoutMillis()))
-                .build();
+        this.objectMapper = objectMapper;
+        this.httpClient = httpClient;
     }
 
     public void setEventListener(SpringBridgeEventListener eventListener) {
@@ -187,7 +204,7 @@ public class SpringBridgeClient {
         }
     }
 
-    private void connectAndConsumeSse() throws IOException, InterruptedException {
+    void connectAndConsumeSse() throws IOException, InterruptedException {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(config.baseUrl() + "/internal/minecraft/stream"))
                 .header("Accept", "text/event-stream")
@@ -200,15 +217,18 @@ public class SpringBridgeClient {
         }
 
         HttpResponse<InputStream> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+        InputStream responseStream = response.body();
         if (response.statusCode() / 100 != 2) {
-            String body = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
-            throw new IOException("Spring bridge SSE status=" + response.statusCode() + " body=" + body);
+            try (InputStream inputStream = responseStream) {
+                String body = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+                throw new IOException("Spring bridge SSE status=" + response.statusCode() + " body=" + body);
+            }
         }
 
         plugin.getLogger().info("Connected to Spring bridge SSE.");
-        currentSseStream = response.body();
+        currentSseStream = responseStream;
 
-        try (InputStream inputStream = response.body();
+        try (InputStream inputStream = responseStream;
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
             String line;
             String eventName = null;
@@ -247,19 +267,14 @@ public class SpringBridgeClient {
         }
     }
 
-    private void dispatchEvent(String eventName, String eventId, String data) {
+    void dispatchEvent(String eventName, String eventId, String data) throws IOException, InterruptedException {
         if (eventName == null || eventName.isBlank()) {
             return;
         }
 
         SpringBridgeEventListener listener = eventListener;
         if (listener == null) {
-            plugin.getLogger().warning("Spring bridge event listener is not configured yet.");
-            return;
-        }
-
-        if (eventId != null && !eventId.isBlank()) {
-            lastEventId = eventId;
+            throw new IOException("Spring bridge event listener is not configured yet.");
         }
 
         try {
@@ -267,35 +282,61 @@ public class SpringBridgeClient {
                 case "CHAT_FROM_APP" -> {
                     SpringBridgeModels.AppChatMessage message =
                             objectMapper.readValue(data, SpringBridgeModels.AppChatMessage.class);
-                    runOnMainThread(() -> listener.onChatFromApp(message));
+                    runOnMainThreadAndWait(() -> listener.onChatFromApp(message));
                 }
                 case "WHITELIST_SNAPSHOT" -> {
                     SpringBridgeModels.WhitelistSnapshot snapshot =
                             objectMapper.readValue(data, SpringBridgeModels.WhitelistSnapshot.class);
+                    runOnMainThreadAndWait(() -> listener.onWhitelistSnapshot(snapshot));
                     initialSnapshotLatch.countDown();
-                    runOnMainThread(() -> listener.onWhitelistSnapshot(snapshot));
                 }
                 case "WHITELIST_UPSERT" -> {
                     SpringBridgeModels.WhitelistEntry entry =
                             objectMapper.readValue(data, SpringBridgeModels.WhitelistEntry.class);
-                    runOnMainThread(() -> listener.onWhitelistUpsert(entry));
+                    runOnMainThreadAndWait(() -> listener.onWhitelistUpsert(entry));
                 }
                 case "WHITELIST_REMOVE" -> {
                     SpringBridgeModels.WhitelistEntry entry =
                             objectMapper.readValue(data, SpringBridgeModels.WhitelistEntry.class);
-                    runOnMainThread(() -> listener.onWhitelistRemove(entry));
+                    runOnMainThreadAndWait(() -> listener.onWhitelistRemove(entry));
                 }
                 case "HEARTBEAT" -> {
                     // no-op
                 }
-                default -> plugin.getLogger().warning("Unknown Spring bridge SSE event: " + eventName);
+                default -> throw new IOException("Unknown Spring bridge SSE event: " + eventName);
             }
-        } catch (Exception e) {
+            if (eventId != null && !eventId.isBlank()) {
+                lastEventId = eventId;
+            }
+        } catch (IOException e) {
             plugin.getLogger().log(Level.WARNING, "Failed to handle Spring bridge SSE event: " + eventName, e);
+            throw e;
+        } catch (RuntimeException e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to handle Spring bridge SSE event: " + eventName, e);
+            throw new IOException("Spring bridge SSE event processing failed: " + eventName, e);
         }
     }
 
-    private void runOnMainThread(Runnable task) {
-        plugin.getServer().getScheduler().runTask(plugin, task);
+    private void runOnMainThreadAndWait(Runnable task) throws IOException, InterruptedException {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        try {
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                try {
+                    task.run();
+                    future.complete(null);
+                } catch (Throwable throwable) {
+                    future.completeExceptionally(throwable);
+                }
+            });
+        } catch (RuntimeException e) {
+            throw new IOException("Failed to schedule Spring bridge event on main thread.", e);
+        }
+
+        try {
+            future.get();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new IOException("Spring bridge event handler failed on main thread.", cause);
+        }
     }
 }
